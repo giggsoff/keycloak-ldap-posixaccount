@@ -12,26 +12,24 @@
  * limitations under the License.
  */
 
-package be.ac.rma.hpc.mapper;
+package org.keycloak.storage.ldap.mappers.membership.group;
 
+import org.apache.commons.collections4.ListUtils;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.component.ComponentValidationException;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.provider.ProviderConfigProperty;
 import org.keycloak.provider.ProviderConfigurationBuilder;
-import org.keycloak.storage.ldap.LDAPConfig;
 import org.keycloak.storage.ldap.LDAPStorageProvider;
 import org.keycloak.storage.ldap.mappers.AbstractLDAPStorageMapper;
-import org.keycloak.storage.ldap.mappers.AbstractLDAPStorageMapperFactory;
-import org.keycloak.storage.ldap.mappers.LDAPConfigDecorator;
 
 import java.util.List;
 
 /**
  * @author Bart Janssens
  */
-public class LdapPosixAccountFactory extends AbstractLDAPStorageMapperFactory implements LDAPConfigDecorator {
+public class LdapPosixAccountFactory extends GroupLDAPStorageMapperFactory {
 
     public static final String PROVIDER_ID = "keycloak-ldap-posixaccount";
     protected static final List<ProviderConfigProperty> configProperties;
@@ -44,7 +42,7 @@ public class LdapPosixAccountFactory extends AbstractLDAPStorageMapperFactory im
     static List<ProviderConfigProperty> getConfigProps(ComponentModel p) {
 
         ProviderConfigurationBuilder config = ProviderConfigurationBuilder.create()
-                .property().name(LdapPosixAccount.LDAP_NEXT_UID)
+                .property().name(org.keycloak.storage.ldap.mappers.membership.group.LdapPosixAccount.LDAP_NEXT_UID)
                 .label("Next POSIX UID")
                 .helpText("Value for the POSIX UID number for the next new user. This should not refer to any existing user and will be incremented automatically with each newly added user.")
                 .type(ProviderConfigProperty.STRING_TYPE)
@@ -54,12 +52,12 @@ public class LdapPosixAccountFactory extends AbstractLDAPStorageMapperFactory im
 
     @Override
     public String getHelpText() {
-        return "Used to assign an auto-incrementing POSIX account UID number (LDAP attribute uidNumber) to newly created LDAP users. Also sets homeDirectory to /home/username.";
+        return "Used to assign an auto-incrementing POSIX account UID number (LDAP attribute uidNumber) to newly created LDAP users. Also sets homeDirectory to /home/username. Also map groups and set GID numbers.";
     }
 
     @Override
     public List<ProviderConfigProperty> getConfigProperties() {
-        return configProperties;
+        return ListUtils.union(super.getConfigProperties(), configProperties);
     }
 
     @Override
@@ -69,20 +67,17 @@ public class LdapPosixAccountFactory extends AbstractLDAPStorageMapperFactory im
 
     @Override
     public void validateConfiguration(KeycloakSession session, RealmModel realm, ComponentModel config) throws ComponentValidationException {
-        checkMandatoryConfigAttribute(LdapPosixAccount.LDAP_NEXT_UID, "Next POSIX UID", config);
+        super.validateConfiguration(session, realm, config);
+        checkMandatoryConfigAttribute(org.keycloak.storage.ldap.mappers.membership.group.LdapPosixAccount.LDAP_NEXT_UID, "Next POSIX UID", config);
     }
 
     @Override
     protected AbstractLDAPStorageMapper createMapper(ComponentModel mapperModel, LDAPStorageProvider federationProvider) {
-        return new LdapPosixAccount(mapperModel, federationProvider);
+        return new org.keycloak.storage.ldap.mappers.membership.group.LdapPosixAccount(mapperModel, federationProvider, this);
     }
 
     @Override
     public List<ProviderConfigProperty> getConfigProperties(RealmModel realm, ComponentModel parent) {
-        return getConfigProps(parent);
-    }
-
-    @Override
-    public void updateLDAPConfig(LDAPConfig ldapConfig, ComponentModel mapperModel) {
+        return ListUtils.union(super.getConfigProperties(), getConfigProps(parent));
     }
 }

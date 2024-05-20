@@ -1,1 +1,1 @@
-be.ac.rma.hpc.mapper.LdapPosixAccountFactory
+org.keycloak.storage.ldap.mappers.membership.group.LdapPosixAccountFactory
