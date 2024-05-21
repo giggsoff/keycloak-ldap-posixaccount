@@ -48,22 +48,25 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
-import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-/**
- * @author <a href="mailto:mposolda@redhat.com">Marek Posolda</a>
- */
-public class GroupLDAPStorageMapper extends AbstractLDAPStorageMapper implements CommonLDAPGroupMapper {
+//FIXME: can we not copy internal keycloak module, but extend it somehow it has private/final/protected fields unfortunately.
+public class LdapPosixAccount extends AbstractLDAPStorageMapper implements CommonLDAPGroupMapper {
 
-    private static final Logger logger = Logger.getLogger(GroupLDAPStorageMapper.class);
+    private static final Logger logger = Logger.getLogger(LdapPosixAccount.class);
+
+    public static final String LDAP_NEXT_UID = "ldap.next.uid";
+    public static final String LDAP_POSIX_UID_ATTRIBUTE_NAME = "uidNumber";
+    public static final String LDAP_POSIX_HOME_ATTRIBUTE_NAME = "homeDirectory";
+    public static final String LDAP_POSIX_GID_ATTRIBUTE_NAME = "gidNumber";
 
     private final GroupMapperConfig config;
     private final GroupLDAPStorageMapperFactory factory;
@@ -71,12 +74,33 @@ public class GroupLDAPStorageMapper extends AbstractLDAPStorageMapper implements
     // Flag to avoid syncing multiple times per transaction
     private boolean syncFromLDAPPerformedInThisTransaction = false;
 
-    public GroupLDAPStorageMapper(ComponentModel mapperModel, LDAPStorageProvider ldapProvider, GroupLDAPStorageMapperFactory factory) {
+    public LdapPosixAccount(ComponentModel mapperModel, LDAPStorageProvider ldapProvider, GroupLDAPStorageMapperFactory factory) {
         super(mapperModel, ldapProvider);
         this.config = new GroupMapperConfig(mapperModel);
         this.factory = factory;
     }
 
+    @Override
+    public Set<String> mandatoryAttributeNames() {
+        Set<String> names = new LinkedHashSet<>();
+        names.add(LDAP_POSIX_UID_ATTRIBUTE_NAME);
+        names.add(LDAP_POSIX_HOME_ATTRIBUTE_NAME);
+        names.add(LDAP_POSIX_GID_ATTRIBUTE_NAME);
+        return names;
+    }
+
+    private String getUid() {
+        return mapperModel.getConfig().getFirst(LDAP_NEXT_UID);
+    }
+
+    private void updateUid(RealmModel realm) {
+        // FIXME: is it really helps to avoid concurrent update of settings?
+        KeycloakModelUtils.runJobInTransaction(ldapProvider.getSession().getKeycloakSessionFactory(), session -> {
+            int next_uid = Integer.parseInt(getUid()) + 1;
+            mapperModel.getConfig().putSingle(LDAP_NEXT_UID, String.valueOf(next_uid));
+            realm.updateComponent(mapperModel);
+        });
+    }
 
     // CommonLDAPGroupMapper interface
 
@@ -89,7 +113,6 @@ public class GroupLDAPStorageMapper extends AbstractLDAPStorageMapper implements
     public CommonLDAPGroupMapperConfig getConfig() {
         return config;
     }
-
 
 
     // LDAP Group CRUD operations
@@ -126,7 +149,9 @@ public class GroupLDAPStorageMapper extends AbstractLDAPStorageMapper implements
         return ldapQuery;
     }
 
-    public LDAPObject createLDAPGroup(String groupName, Map<String, Set<String>> additionalAttributes) {
+    public LDAPObject createLDAPGroup(String groupName, Map<String, Set<String>> additionalAttributes, RealmModel realm) {
+        additionalAttributes.put(LDAP_POSIX_GID_ATTRIBUTE_NAME, Collections.singleton(getUid()));
+        updateUid(session.realms().getRealm(realm.getId()));
         LDAPObject ldapGroup = LDAPUtils.createLDAPGroup(ldapProvider, groupName, config.getGroupNameLdapAttribute(), config.getGroupObjectClasses(ldapProvider),
                 config.getGroupsDn(), additionalAttributes, config.getMembershipLdapAttribute());
 
@@ -352,7 +377,7 @@ public class GroupLDAPStorageMapper extends AbstractLDAPStorageMapper implements
 
         for (String attrName : groupAttributes) {
             Set<String> attrValues = ldapGroup.getAttributeAsSet(attrName);
-            if (attrValues==null) {
+            if (attrValues == null) {
                 kcGroup.removeAttribute(attrName);
             } else {
                 kcGroup.setAttribute(attrName, new LinkedList<>(attrValues));
@@ -450,7 +475,7 @@ public class GroupLDAPStorageMapper extends AbstractLDAPStorageMapper implements
 
         // Create or update KC groups to LDAP including their attributes
         getKcSubGroups(realm, null)
-                .forEach(kcGroup -> processKeycloakGroupSyncToLDAP(kcGroup, ldapGroupsMap, ldapGroupNames, syncResult));
+                .forEach(kcGroup -> processKeycloakGroupSyncToLDAP(kcGroup, ldapGroupsMap, ldapGroupNames, syncResult, realm));
 
         // If dropNonExisting, then drop all groups, which doesn't exist in KC from LDAP as well
         if (config.isDropNonExistingGroupsDuringSync()) {
@@ -476,7 +501,7 @@ public class GroupLDAPStorageMapper extends AbstractLDAPStorageMapper implements
     // For given kcGroup check if it exists in LDAP (map) by name
     // If not, create it in LDAP including attributes. Otherwise update attributes in LDAP.
     // Process this recursively for all subgroups of KC group
-    private void processKeycloakGroupSyncToLDAP(GroupModel kcGroup, Map<String, LDAPObject> ldapGroupsMap, Set<String> ldapGroupNames, SynchronizationResult syncResult) {
+    private void processKeycloakGroupSyncToLDAP(GroupModel kcGroup, Map<String, LDAPObject> ldapGroupsMap, Set<String> ldapGroupNames, SynchronizationResult syncResult, RealmModel realm) {
         String groupName = kcGroup.getName();
 
         // extract group attributes to be updated to LDAP
@@ -489,7 +514,7 @@ public class GroupLDAPStorageMapper extends AbstractLDAPStorageMapper implements
         LDAPObject ldapGroup = ldapGroupsMap.get(groupName);
 
         if (ldapGroup == null) {
-            ldapGroup = createLDAPGroup(groupName, supportedLdapAttributes);
+            ldapGroup = createLDAPGroup(groupName, supportedLdapAttributes, realm);
             syncResult.increaseAdded();
         } else {
             for (Map.Entry<String, Set<String>> attrEntry : supportedLdapAttributes.entrySet()) {
@@ -505,7 +530,7 @@ public class GroupLDAPStorageMapper extends AbstractLDAPStorageMapper implements
 
         // process KC subgroups
         kcGroup.getSubGroupsStream()
-                .forEach(kcSubgroup -> processKeycloakGroupSyncToLDAP(kcSubgroup, ldapGroupsMap, ldapGroupNames, syncResult));
+                .forEach(kcSubgroup -> processKeycloakGroupSyncToLDAP(kcSubgroup, ldapGroupsMap, ldapGroupNames, syncResult, realm));
     }
 
     // Update memberships of group in LDAP based on subgroups from KC. Do it recursively
@@ -589,7 +614,7 @@ public class GroupLDAPStorageMapper extends AbstractLDAPStorageMapper implements
                 logger.debugf("Will sync group '%s' and it's subgroups from DB to LDAP", highestGroupToSync.getName());
 
                 Map<String, LDAPObject> syncedLDAPGroups = new HashMap<>();
-                processKeycloakGroupSyncToLDAP(highestGroupToSync, syncedLDAPGroups, new HashSet<>(), new SynchronizationResult());
+                processKeycloakGroupSyncToLDAP(highestGroupToSync, syncedLDAPGroups, new HashSet<>(), new SynchronizationResult(), realm);
                 processKeycloakGroupMembershipsSyncToLDAP(highestGroupToSync, syncedLDAPGroups);
 
                 ldapGroup = loadLDAPGroupByName(groupName);
@@ -602,7 +627,7 @@ public class GroupLDAPStorageMapper extends AbstractLDAPStorageMapper implements
             } else {
                 // No care about group inheritance. Let's just sync current group
                 logger.debugf("Will sync group '%s' from DB to LDAP", groupName);
-                processKeycloakGroupSyncToLDAP(kcGroup, new HashMap<>(), new HashSet<>(), new SynchronizationResult());
+                processKeycloakGroupSyncToLDAP(kcGroup, new HashMap<>(), new HashSet<>(), new SynchronizationResult(), realm);
                 ldapGroup = loadLDAPGroupByName(groupName);
             }
         }
@@ -646,6 +671,13 @@ public class GroupLDAPStorageMapper extends AbstractLDAPStorageMapper implements
 
     @Override
     public void onRegisterUserToLDAP(LDAPObject ldapUser, UserModel localUser, RealmModel realm) {
+        logger.debug("Adding ldap user" + ldapUser.toString());
+        String uid = getUid();
+        ldapUser.setSingleAttribute(LDAP_POSIX_UID_ATTRIBUTE_NAME, uid);
+        ldapUser.setSingleAttribute(LDAP_POSIX_GID_ATTRIBUTE_NAME, uid);
+        String username = localUser.getUsername();
+        ldapUser.setSingleAttribute(LDAP_POSIX_HOME_ATTRIBUTE_NAME, "/home/" + username);
+        updateUid(realm);
     }
 
     @Override
@@ -751,7 +783,7 @@ public class GroupLDAPStorageMapper extends AbstractLDAPStorageMapper implements
 
         @Override
         public boolean isMemberOf(GroupModel group) {
-            return RoleUtils.isDirectMember(getGroupsStream(),group);
+            return RoleUtils.isDirectMember(getGroupsStream(), group);
         }
 
         protected Stream<GroupModel> getLDAPGroupMappingsConverted() {
